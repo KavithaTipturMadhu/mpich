@@ -177,6 +177,43 @@ static int node_split_processor(MPIR_Comm * comm_ptr, int key, hwloc_obj_type_t 
   fn_fail:
     goto fn_exit;
 }
+
+static int node_split_device(MPIR_Comm * comm_ptr, int key, hwloc_obj_type_t obj_type,
+                         const char *device_id, MPIR_Comm ** newcomm_ptr)
+{
+    int color;
+    hwloc_obj_t obj_containing_cpuset, io_device = NULL;
+    int mpi_errno = MPI_SUCCESS;
+
+    /* assign the node id as the color, initially */
+    MPID_Get_node_id(comm_ptr, comm_ptr->rank, &color);
+
+    obj_containing_cpuset =
+        hwloc_get_obj_covering_cpuset(MPIR_Process.topology, MPIR_Process.bindset);
+    MPIR_Assert(obj_containing_cpuset != NULL);
+    if (obj_type == HWLOC_OBJ_PCI_DEVICE) {
+        io_device = hwloc_get_pcidev_by_busidstring(MPIR_Process.topology, device_id);
+    }
+
+    if (io_device != NULL && obj_containing_cpuset != NULL) {
+        hwloc_obj_t non_io_ancestor =
+            hwloc_get_non_io_ancestor_obj(MPIR_Process.topology, io_device);
+        if (hwloc_obj_is_in_subtree(MPIR_Process.topology, obj_containing_cpuset, non_io_ancestor)) {
+            color = obj_containing_cpuset->logical_index;
+        }
+    }
+
+    mpi_errno = MPIR_Comm_split_impl(comm_ptr, color, key, newcomm_ptr);
+    if (mpi_errno)
+        MPIR_ERR_POP(mpi_errno);
+
+  fn_exit:
+    return mpi_errno;
+
+  fn_fail:
+    goto fn_exit;
+}
+
 #endif /* HAVE_HWLOC */
 
 static const char *SHMEM_INFO_KEY = "shmem_topo";
@@ -195,6 +232,7 @@ int MPIR_Comm_split_type_node_topo(MPIR_Comm * user_comm_ptr, int split_type, in
     char hintval[MPI_MAX_INFO_VAL + 1];
     int i, flag = 0;
     hwloc_obj_type_t obj_type, obj_type_global;
+    char *device_id, *device_id_global;
     int info_args_are_equal;
     MPIR_Errflag_t errflag = MPIR_ERR_NONE;
 #endif
@@ -218,6 +256,7 @@ int MPIR_Comm_split_type_node_topo(MPIR_Comm * user_comm_ptr, int split_type, in
     /* initially point to HWLOC_OBJ_TYPE_MAX and then see if there is
      * an info argument pointing to a different object */
     obj_type = HWLOC_OBJ_TYPE_MAX;
+    device_id = NULL;
     if (info_ptr) {
         MPIR_Info_get_impl(info_ptr, SHMEM_INFO_KEY, MPI_MAX_INFO_VAL, hintval, &flag);
         if (flag) {
@@ -229,18 +268,46 @@ int MPIR_Comm_split_type_node_topo(MPIR_Comm * user_comm_ptr, int split_type, in
                     break;
                 }
             }
+
+            /* if we have not found it yet, try to see if the value
+             * matches any of our known strings.  right now, we only
+             * understand "cache". */
+            if (obj_type == HWLOC_OBJ_TYPE_MAX) {
+                const char *d = NULL;
+                if (!strncmp(hintval, "pci:", strlen("pci:"))) {
+                    obj_type = HWLOC_OBJ_PCI_DEVICE;
+                    d = hintval + strlen("pci:");
+                    device_id = (char *) malloc((strlen(hintval) - strlen("pci:")) * sizeof(char));
+                }
+                if (!d) {
+                    i = 0;
+                    while (*d != '\0') {
+                        device_id[i++] = *d;
+                        d++;
+                        if (*d == '\0')
+                            break;
+                    }
+
+                    device_id[i] = '\0';
+                }
+            }
         }
     }
 
     /* even if we did not give an info key, do an allreduce since
      * other processes might have given an info key */
     mpi_errno =
-        MPIR_Allreduce(&obj_type, &obj_type_global, sizeof(obj_type), MPI_BYTE, MPI_BAND, comm_ptr,
-                       &errflag);
+        MPIR_Allreduce(&obj_type, &obj_type_global, sizeof(obj_type), MPI_BYTE,
+                       MPI_BAND, comm_ptr, &errflag);
     if (mpi_errno)
         MPIR_ERR_POP(mpi_errno);
 
-    info_args_are_equal = (obj_type == obj_type_global);
+    mpi_errno =
+        MPIR_Allreduce(device_id, device_id_global, sizeof(device_id), MPI_BYTE,
+                       MPI_BAND, comm_ptr, &errflag);
+    if (mpi_errno)
+        MPIR_ERR_POP(mpi_errno);
+    info_args_are_equal = (obj_type == obj_type_global && !strcmp(device_id, device_id_global));
     mpi_errno =
         MPIR_Allreduce(MPI_IN_PLACE, &info_args_are_equal, 1, MPI_INT, MPI_MIN, comm_ptr, &errflag);
     if (mpi_errno)
@@ -260,7 +327,10 @@ int MPIR_Comm_split_type_node_topo(MPIR_Comm * user_comm_ptr, int split_type, in
     if (obj_type == HWLOC_OBJ_TYPE_MAX)
         goto use_node_comm;
 
-    mpi_errno = node_split_processor(comm_ptr, key, obj_type, newcomm_ptr);
+    else if (obj_type == HWLOC_OBJ_PCI_DEVICE || obj_type == HWLOC_OBJ_OS_DEVICE)
+        mpi_errno = node_split_device(comm_ptr, key, obj_type, device_id, newcomm_ptr);
+    else
+        mpi_errno = node_split_processor(comm_ptr, key, obj_type, newcomm_ptr);
     if (mpi_errno)
         MPIR_ERR_POP(mpi_errno);
 
