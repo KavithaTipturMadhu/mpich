@@ -10,6 +10,15 @@
 
 #ifdef HAVE_HWLOC
 #include "hwloc.h"
+#ifdef HWLOC_HAVE_CUDA
+#include "hwloc/cuda.h"
+#endif
+#ifdef HWLOC_HAVE_OPENCL
+#include "hwloc/opencl.h"
+#endif
+#ifdef HWLOC_HAVE_LIBIBVERBS_TRUE
+#include "hwloc/openfabrics-verbs.h"
+#endif
 #endif
 
 /* -- Begin Profiling Symbol Block for routine MPI_Comm_split_type */
@@ -179,7 +188,8 @@ static int node_split_processor(MPIR_Comm * comm_ptr, int key, hwloc_obj_type_t 
 }
 
 static int node_split_device(MPIR_Comm * comm_ptr, int key, hwloc_obj_type_t obj_type,
-                         const char *device_id, MPIR_Comm ** newcomm_ptr)
+                             hwloc_obj_osdev_type_t osdev_type, const char *device_id,
+                             MPIR_Comm ** newcomm_ptr)
 {
     int color;
     hwloc_obj_t obj_containing_cpuset, io_device = NULL;
@@ -193,16 +203,106 @@ static int node_split_device(MPIR_Comm * comm_ptr, int key, hwloc_obj_type_t obj
     MPIR_Assert(obj_containing_cpuset != NULL);
     if (obj_type == HWLOC_OBJ_PCI_DEVICE) {
         io_device = hwloc_get_pcidev_by_busidstring(MPIR_Process.topology, device_id);
-    }
+        goto split_id;
+    } else if (obj_type == HWLOC_OBJ_OS_DEVICE) {
+        switch (osdev_type) {
+            case HWLOC_OBJ_OSDEV_COPROC:
+                if (device_id[0] != '\0') {
+#ifdef HWLOC_HAVE_CUDA
+                    io_device =
+                        hwloc_cuda_get_device_osdev_by_index(MPIR_Process.topology,
+                                                             atoi(device_id));
+#endif
+                    if (io_device == NULL) {
+#ifdef HWLOC_HAVE_OPENCL
+                        io_device = hwloc_opencl_get_device_by_index(MPIR_Process.topology,
+                                                                     atoi
+                                                                     (info_obj_type->device_id));
+#endif
+                    }
+                    goto split_id;
+                } else {
+                    hwloc_obj_t osdev = NULL;
+                    while ((osdev = hwloc_get_next_osdev(MPIR_Process.topology, osdev)) != NULL) {
+                        if (HWLOC_OBJ_OSDEV_COPROC == osdev->attr->osdev.type && osdev->name) {
+                            if (!strncmp("cuda", osdev->name, 4) ||
+                                !strncmp("opencl", osdev->name, 6)) {
+                                hwloc_cpuset_t cpuset;
+                                if (!strncmp("cuda", osdev->name, 4)) {
+#ifdef HAVE_CUDA_H
+                                    cpuset =
+                                        hwloc_cuda_get_device_cpuset(MPIR_Process.topology, osdev);
+#endif
+                                } else {
+#ifdef HWLOC_HAVE_OPENCL
+                                    cpuset =
+                                        hwloc_opencl_get_device_cpuset(MPIR_Process.topology,
+                                                                       osdev);
+#endif
+                                }
+                                hwloc_obj_t covering_object =
+                                    hwloc_get_obj_covering_cpuset(MPIR_Process.topology, cpuset);
+                                if (hwloc_obj_is_in_subtree
+                                    (MPIR_Process.topology,
+                                     hwloc_get_obj_covering_cpuset(MPIR_Process.topology,
+                                                                   obj_containing_cpuset),
+                                     covering_object)) {
+                                    /*
+                                     * The first half of color is the type and the next half contains the logical index to ensure uniqueness in color.
+                                     * This is necessary because there could be 2 gpus for example, one connected to a package directly and another to
+                                     * a numa node. Now, we need to distinguish between package and numa node with the same logical index
+                                     */
+                                    color = ((osdev->type << sizeof(int)) * 4)
+                                        + osdev->logical_index;
+                                    goto split_color;
+                                }
+                            }
+                        }
+                    }
+                }
+                //No GPUs in the target
+                goto split_color;
+            case HWLOC_OBJ_OSDEV_OPENFABRICS:
+#ifdef HWLOC_HAVE_LIBIBVERBS_TRUE
+                if (device_id !== NULL) {
+                    io_device =
+                        hwloc_ibv_get_device_osdev_by_name(MPIR_Process.topology, device_id);
+                    goto split_id;
+                } else {
+                    hwloc_obj_t osdev = NULL;
+                    while ((osdev = hwloc_get_next_osdev(MPIR_Process.topology, osdev)) != NULL) {
+                        if (HWLOC_OBJ_OSDEV_OPENFABRICS == osdev->attr->osdev.type && osdev->name) {
+                            hwloc_cpuset_t cpuset =
+                                hwloc_ibv_get_device_cpuset(MPIR_Process.topology, osdev);
+                            hwloc_obj_t covering_object =
+                                hwloc_get_obj_covering_cpuset(MPIR_Process.topology, cpuset);
+                            if (hwloc_obj_is_in_subtree
+                                (MPIR_Process.topology,
+                                 hwloc_get_obj_covering_cpuset(MPIR_Process.topology,
+                                                               obj_containing_cpuset),
+                                 covering_object)) {
+                                color = ((osdev->type << sizeof(int)) * 4) + osdev->logical_index;
+                                goto split_color;
+                            }
+                        }
+                    }
 
-    if (io_device != NULL && obj_containing_cpuset != NULL) {
-        hwloc_obj_t non_io_ancestor =
-            hwloc_get_non_io_ancestor_obj(MPIR_Process.topology, io_device);
-        if (hwloc_obj_is_in_subtree(MPIR_Process.topology, obj_containing_cpuset, non_io_ancestor)) {
-            color = obj_containing_cpuset->logical_index;
+                }
+#endif
+                goto split_color;
         }
     }
 
+  split_id:
+    if (io_device != NULL) {
+        hwloc_obj_t non_io_ancestor =
+            hwloc_get_non_io_ancestor_obj(MPIR_Process.topology, io_device);
+        if (hwloc_obj_is_in_subtree(MPIR_Process.topology, obj_containing_cpuset, non_io_ancestor)) {
+            color = non_io_ancestor->logical_index;
+        }
+    }
+
+  split_color:
     mpi_errno = MPIR_Comm_split_impl(comm_ptr, color, key, newcomm_ptr);
     if (mpi_errno)
         MPIR_ERR_POP(mpi_errno);
@@ -232,6 +332,7 @@ int MPIR_Comm_split_type_node_topo(MPIR_Comm * user_comm_ptr, int split_type, in
     char hintval[MPI_MAX_INFO_VAL + 1];
     int i, flag = 0;
     hwloc_obj_type_t obj_type, obj_type_global;
+    hwloc_obj_osdev_type_t osdev_type, osdev_type_global;
     char *device_id, *device_id_global;
     int info_args_are_equal;
     MPIR_Errflag_t errflag = MPIR_ERR_NONE;
@@ -257,6 +358,7 @@ int MPIR_Comm_split_type_node_topo(MPIR_Comm * user_comm_ptr, int split_type, in
      * an info argument pointing to a different object */
     obj_type = HWLOC_OBJ_TYPE_MAX;
     device_id = NULL;
+    osdev_type = -1;
     if (info_ptr) {
         MPIR_Info_get_impl(info_ptr, SHMEM_INFO_KEY, MPI_MAX_INFO_VAL, hintval, &flag);
         if (flag) {
@@ -278,18 +380,39 @@ int MPIR_Comm_split_type_node_topo(MPIR_Comm * user_comm_ptr, int split_type, in
                     obj_type = HWLOC_OBJ_PCI_DEVICE;
                     d = hintval + strlen("pci:");
                     device_id = (char *) malloc((strlen(hintval) - strlen("pci:")) * sizeof(char));
-                }
-                if (!d) {
-                    i = 0;
-                    while (*d != '\0') {
-                        device_id[i++] = *d;
+                } else if (!strncmp(hintval, "ib", strlen("ib"))) {
+                    obj_type = HWLOC_OBJ_OS_DEVICE;
+                    osdev_type = HWLOC_OBJ_OSDEV_OPENFABRICS;
+                    d = hintval + strlen("ib");
+                    if (*d == ':') {
                         d++;
-                        if (*d == '\0')
-                            break;
+                        device_id =
+                            (char *) malloc((strlen(hintval) - strlen("ib:")) * sizeof(char));
+                    } else {
+                        device_id =
+                            (char *) malloc((strlen(hintval) - strlen("ib")) * sizeof(char));
                     }
-
-                    device_id[i] = '\0';
+                } else if (!strncmp(hintval, "gpu", strlen("gpu"))) {
+                    obj_type = HWLOC_OBJ_OS_DEVICE;
+                    osdev_type = HWLOC_OBJ_OSDEV_COPROC;
+                    d = hintval + strlen("gpu");
+                    if (*d == ':') {
+                        d++;
+                        device_id =
+                            (char *) malloc((strlen(hintval) - strlen("gpu:")) * sizeof(char));
+                    } else {
+                        device_id =
+                            (char *) malloc((strlen(hintval) - strlen("gpu")) * sizeof(char));
+                    }
                 }
+                int i = 0;
+                while (*d != '\0') {
+                    device_id[i++] = *d;
+                    d++;
+                    if (*d == '\0')
+                        break;
+                }
+                device_id[i] = '\0';
             }
         }
     }
@@ -303,11 +426,18 @@ int MPIR_Comm_split_type_node_topo(MPIR_Comm * user_comm_ptr, int split_type, in
         MPIR_ERR_POP(mpi_errno);
 
     mpi_errno =
+        MPIR_Allreduce(&osdev_type, &osdev_type_global, sizeof(osdev_type), MPI_BYTE,
+                       MPI_BAND, comm_ptr, &errflag);
+    if (mpi_errno)
+        MPIR_ERR_POP(mpi_errno);
+
+    mpi_errno =
         MPIR_Allreduce(device_id, device_id_global, sizeof(device_id), MPI_BYTE,
                        MPI_BAND, comm_ptr, &errflag);
     if (mpi_errno)
         MPIR_ERR_POP(mpi_errno);
-    info_args_are_equal = (obj_type == obj_type_global && !strcmp(device_id, device_id_global));
+    info_args_are_equal = (obj_type == obj_type_global &&
+                           !strcmp(device_id, device_id_global) && osdev_type == osdev_type_global);
     mpi_errno =
         MPIR_Allreduce(MPI_IN_PLACE, &info_args_are_equal, 1, MPI_INT, MPI_MIN, comm_ptr, &errflag);
     if (mpi_errno)
@@ -328,7 +458,7 @@ int MPIR_Comm_split_type_node_topo(MPIR_Comm * user_comm_ptr, int split_type, in
         goto use_node_comm;
 
     else if (obj_type == HWLOC_OBJ_PCI_DEVICE || obj_type == HWLOC_OBJ_OS_DEVICE)
-        mpi_errno = node_split_device(comm_ptr, key, obj_type, device_id, newcomm_ptr);
+        mpi_errno = node_split_device(comm_ptr, key, obj_type, osdev_type, device_id, newcomm_ptr);
     else
         mpi_errno = node_split_processor(comm_ptr, key, obj_type, newcomm_ptr);
     if (mpi_errno)
