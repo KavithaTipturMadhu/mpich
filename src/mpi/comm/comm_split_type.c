@@ -220,7 +220,7 @@ static int node_split_device(MPIR_Comm * comm_ptr, int key, hwloc_obj_type_t obj
                                                                      (info_obj_type->device_id));
 #endif
                     }
-                    goto split_id;
+                    goto comm_null;
                 } else {
                     hwloc_obj_t osdev = NULL;
                     while ((osdev = hwloc_get_next_osdev(MPIR_Process.topology, osdev)) != NULL) {
@@ -261,7 +261,7 @@ static int node_split_device(MPIR_Comm * comm_ptr, int key, hwloc_obj_type_t obj
                     }
                 }
                 //No GPUs in the target
-                goto split_color;
+                goto comm_null;
             case HWLOC_OBJ_OSDEV_OPENFABRICS:
 #ifdef HWLOC_HAVE_LIBIBVERBS_TRUE
                 if (device_id !== NULL) {
@@ -286,17 +286,21 @@ static int node_split_device(MPIR_Comm * comm_ptr, int key, hwloc_obj_type_t obj
                             }
                         }
                     }
-
                 }
 #endif
                 goto split_color;
         }
     }
 
+  comm_null:
+  	  newcomm_ptr = NULL;
+  	  MPIR_Comm_free_impl(comm_ptr);
+  	  goto fn_exit;
   split_id:
     if (io_device != NULL) {
         hwloc_obj_t non_io_ancestor =
             hwloc_get_non_io_ancestor_obj(MPIR_Process.topology, io_device);
+         MPIR_Assert(non_io_ancestor);
         if (hwloc_obj_is_in_subtree(MPIR_Process.topology, obj_containing_cpuset, non_io_ancestor)) {
             color = non_io_ancestor->logical_index;
         }
@@ -463,7 +467,7 @@ int MPIR_Comm_split_type_node_topo(MPIR_Comm * user_comm_ptr, int split_type, in
         mpi_errno = node_split_processor(comm_ptr, key, obj_type, newcomm_ptr);
     if (mpi_errno)
         MPIR_ERR_POP(mpi_errno);
-
+    printf("do i return a null?%d\n", (newcomm_ptr == NULL));
     MPIR_Comm_free_impl(comm_ptr);
     goto fn_exit;
 #endif /* HAVE_HWLOC */
