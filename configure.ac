@@ -1501,6 +1501,34 @@ HWLOC_DO_AM_CONDITIONALS
 AM_CONDITIONAL([have_hwloc], [test "${have_hwloc}" = "yes"])
 AM_CONDITIONAL([use_embedded_hwloc], [test "${use_embedded_hwloc}" = "yes"])
 
+# ----------------------------------------------------------------------------
+# NETLOC
+# ----------------------------------------------------------------------------
+AC_ARG_WITH([netloc-prefix],
+            [AS_HELP_STRING([[--with-netloc-prefix[=DIR]]],
+                            [use the NETLOC library installed in DIR])], [],["netloc location must be specified"],
+	    [],
+	    [with_netloc_prefix=no])
+
+netloclibdir=""
+AC_SUBST([netloclibdir])
+
+if test "${with_netloc_prefix}" != "no" ; then
+   # The user specified an already-installed OPA; just sanity check,
+   # don't subconfigure it
+   AS_IF([test -s "${with_netloc_prefix}/include/netloc.h"],
+         [:],[AC_MSG_ERROR([the Netloc installation in "${with_netloc_prefix}" appears broken])])
+   PAC_APPEND_FLAG([-I${with_netloc_prefix}/include],[CPPFLAGS])
+   PAC_PREPEND_FLAG([-lnetloc],[WRAPPER_LIBS])
+   if test -d ${with_netloc_prefix}/lib64 ; then
+      PAC_APPEND_FLAG([-L${with_netloc_prefix}/lib64],[WRAPPER_LDFLAGS])
+      netloclibdir="-L${with_netloc_prefix}/lib64"
+   else
+      PAC_APPEND_FLAG([-L${with_netloc_prefix}/lib],[WRAPPER_LDFLAGS])
+      netloclibdir="-L${with_netloc_prefix}/lib"
+   fi
+   AC_DEFINE(HAVE_NETLOC,1,[Define if netloc is available])
+fi
 
 # ----------------------------------------------------------------------------
 # Threads
