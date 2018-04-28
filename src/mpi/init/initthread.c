@@ -359,9 +359,13 @@ int MPIR_Init_thread(int *argc, char ***argv, int required, int *provided)
 #endif
 
 #ifdef HAVE_NETLOC
-    netloc_parse_topology(&MPIR_Process.netloc_topology, MPIR_CVAR_NETLOC_NODE_FILE);
-    MPIR_Netloc_parse_topology(MPIR_Process.netloc_topology,
-                               &MPIR_Process.network_attr);
+	if(strlen(MPIR_CVAR_NETLOC_NODE_FILE)) {
+		netloc_parse_topology(&MPIR_Process.netloc_topology, MPIR_CVAR_NETLOC_NODE_FILE);
+		if(MPIR_Process.netloc_topology!=NULL) {
+			MPIR_Netloc_parse_topology(MPIR_Process.netloc_topology,
+					&MPIR_Process.network_attr);
+		}
+	}
 #endif
     /* For any code in the device that wants to check for runtime
      * decisions on the value of isThreaded, set a provisional
