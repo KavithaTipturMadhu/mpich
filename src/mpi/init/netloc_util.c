@@ -23,11 +23,11 @@ static int get_fat_tree_attributes(netloc_topology_t topology,
 
     /* indexed by node id, visited_node_list[i] > 1 indicates that the
      * node i has been visited */
-    network_attr->fat_tree.node_levels =
+    network_attr->u.fat_tree.node_levels =
         (int *) MPL_malloc(sizeof(int) * topology->num_nodes, MPL_MEM_OTHER);
 
     for (i = 0; i < topology->num_nodes; i++) {
-        network_attr->fat_tree.node_levels[i] = -1;
+        network_attr->u.fat_tree.node_levels[i] = -1;
     }
     /* Traversal order never exceeds the total number of nodes anyway */
     traversal_order =
@@ -40,16 +40,16 @@ static int get_fat_tree_attributes(netloc_topology_t topology,
             netloc_edge_t **edges;
 
             /* Mark the host node as visited */
-            network_attr->fat_tree.node_levels[topology->nodes[i]->__uid__] = 0;
+            network_attr->u.fat_tree.node_levels[topology->nodes[i]->__uid__] = 0;
             visited_count++;
 
             /* Copy all parents without duplicates to the traversal list */
             netloc_get_all_edges(topology, topology->nodes[i], &num_edges, &edges);
             for (j = 0; j < num_edges; j++) {
-                if (network_attr->fat_tree.node_levels[edges[j]->dest_node->__uid__] < 0) {
+                if (network_attr->u.fat_tree.node_levels[edges[j]->dest_node->__uid__] < 0) {
                     traversal_order[traversal_end++] = edges[j]->dest_node;
                     /*Switch levels start from 1 */
-                    network_attr->fat_tree.node_levels[edges[j]->dest_node->__uid__] = 1;
+                    network_attr->u.fat_tree.node_levels[edges[j]->dest_node->__uid__] = 1;
                     visited_count++;
                 }
             }
@@ -65,10 +65,10 @@ static int get_fat_tree_attributes(netloc_topology_t topology,
         /* find all nodes not visited with an edge from the current node */
         netloc_get_all_edges(topology, traversed_node, &num_edges, &edges);
         for (j = 0; j < num_edges; j++) {
-            if (network_attr->fat_tree.node_levels[edges[j]->dest_node->__uid__] < 0 ||
-                (depth + 1) < network_attr->fat_tree.node_levels[edges[j]->dest_node->__uid__]) {
+            if (network_attr->u.fat_tree.node_levels[edges[j]->dest_node->__uid__] < 0 ||
+                (depth + 1) < network_attr->u.fat_tree.node_levels[edges[j]->dest_node->__uid__]) {
                 traversal_order[traversal_end++] = edges[j]->dest_node;
-                network_attr->fat_tree.node_levels[edges[j]->dest_node->__uid__] = depth + 1;
+                network_attr->u.fat_tree.node_levels[edges[j]->dest_node->__uid__] = depth + 1;
                 visited_count++;
             }
         }
@@ -408,7 +408,7 @@ int MPIR_get_switches_at_level(netloc_topology_t topology,
         if (switch_node == NULL) {
             break;
         }
-        if (attributes.fat_tree.node_levels[switch_node->__uid__] = level) {
+        if (attributes.u.fat_tree.node_levels[switch_node->__uid__] = level) {
             switches =
                 (netloc_node_t **) MPL_realloc(switches, sizeof(netloc_node_t *) * i,
                                                MPL_MEM_OTHER);

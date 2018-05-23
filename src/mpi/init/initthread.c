@@ -369,7 +369,8 @@ int MPIR_Init_thread(int *argc, char ***argv, int required, int *provided)
 #endif
 
 #ifdef HAVE_NETLOC
-    MPIR_Process.network_attr.fat_tree.node_levels = NULL;
+    MPIR_Process.network_attr.u.torus.geometry = NULL;
+    MPIR_Process.network_attr.u.fat_tree.node_levels = NULL;
     if (strlen(MPIR_CVAR_NETLOC_NODE_FILE) && strlen(MPIR_CVAR_NETLOC_ATTRIBS_FILE)) {
         mpi_errno =
             netloc_parse_topology(&MPIR_Process.netloc_topology, MPIR_CVAR_NETLOC_NODE_FILE);

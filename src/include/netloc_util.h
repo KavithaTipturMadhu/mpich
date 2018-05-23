@@ -12,17 +12,24 @@
 
 typedef enum {
     MPIR_NETLOC_NETWORK_TYPE__FAT_TREE,
+    MPIR_NETLOC_NETWORK_TYPE__TORUS,
     MPIR_NETLOC_NETWORK_TYPE__INVALID,
 } MPIR_Netloc_network_type;
 
 typedef struct {
     MPIR_Netloc_network_type type;
 
-    struct {
-        /* the levels at which the host and switch nodes are in
-         * the network */
-        int *node_levels;
-    } fat_tree;
+    union {
+        struct {
+            /* the levels at which the host and switch nodes are in
+             * the network */
+            int *node_levels;
+        } fat_tree;
+        struct {
+            int dimension;
+            int *geometry;
+        } torus;
+    } u;
 } MPIR_Netloc_network_attributes;
 
 int MPIR_Netloc_parse_topology(const char *attributes_file, netloc_topology_t topology,
