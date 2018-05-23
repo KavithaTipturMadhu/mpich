@@ -400,7 +400,7 @@ static int network_split_switch_level(MPIR_Comm * comm_ptr, int key,
             int num_edges;
             netloc_edge_t **edges;
             if (current_node->node_type == NETLOC_NODE_TYPE_SWITCH
-                && MPIR_Process.network_attr.fat_tree.node_levels[current_node->__uid__]
+                && MPIR_Process.network_attr.u.fat_tree.node_levels[current_node->__uid__]
                 == switch_level) {
                 for (i = 0; i < switch_count; i++) {
                     if (switches_at_level[i] == current_node) {
@@ -436,16 +436,161 @@ static int network_split_switch_level(MPIR_Comm * comm_ptr, int key,
     goto fn_exit;
 }
 
+static void get_prime_factors(int num, int node_dimensions, int **prime_factors, int *num_factors)
+{
+    int i = 0, j;
+    int *factors = (int *) MPL_malloc(node_dimensions * sizeof(int), MPL_MEM_OTHER);
+    while (true) {
+        if (num / 2 == 0)
+            break;
+        factors = (int *) MPL_realloc(factors, (i + 1) * sizeof(int), MPL_MEM_OTHER);
+        factors[i++] = 2;
+        num = num / 2;
+    }
+
+    for (j = 3; j < sqrt(num); j++) {
+        while (true) {
+            if (num / j == 0)
+                break;
+            factors = (int *) MPL_realloc(factors, (i + 1) * sizeof(int), MPL_MEM_OTHER);
+            factors[i++] = j;
+            num = num / j;
+        }
+    }
+
+    while (i < node_dimensions) {
+        factors[i++] = 1;
+    }
+
+    *num_factors = i;
+    *prime_factors = factors;
+
+  fn_exit:
+    return;
+
+  fn_fail:
+    goto fn_exit;
+}
+
 static int network_split_by_size(MPIR_Comm * comm_ptr, int key,
                                  int request_tile_size, MPIR_Comm ** newcomm_ptr)
 {
     int i, j, total_num_nodes, color, num_nodes_covered;
+    int *partition_dimensions;
     int mpi_errno = MPI_SUCCESS;
 
     if (request_tile_size == 0) {
         color = MPI_UNDEFINED;
     } else {
-        if (MPIR_Process.network_attr.type == MPIR_NETLOC_NETWORK_TYPE__FAT_TREE) {
+        if (MPIR_Process.network_attr.type == MPIR_NETLOC_NETWORK_TYPE__TORUS) {
+            int *node_dimensions;
+            int *prime_factors;
+            int num_factors;
+            int tile_size;
+            int comm_size;
+            int current_rank = comm_ptr->rank;
+
+            comm_size = MPIR_Comm_size(comm_ptr);
+            partition_dimensions =
+                (int *) MPL_malloc(MPIR_Process.network_attr.u.torus.dimension * sizeof(int),
+                                   MPL_MEM_OTHER);
+            total_num_nodes = 0;
+            node_dimensions = MPIR_Process.network_attr.u.torus.geometry;
+            for (i = 0; i < MPIR_Process.network_attr.u.torus.dimension; i++) {
+                partition_dimensions[i] = 1;
+                if (total_num_nodes == 0) {
+                    total_num_nodes = node_dimensions[i];
+                } else {
+                    total_num_nodes = total_num_nodes * node_dimensions[i];
+                }
+            }
+
+            for (tile_size = request_tile_size; tile_size <= total_num_nodes; tile_size++) {
+                get_prime_factors(tile_size, MPIR_Process.network_attr.u.torus.dimension,
+                                  &prime_factors, &num_factors);
+                /* Find the right size of tile along each dimension */
+                for (i = MPIR_Process.network_attr.u.torus.dimension; i >= 1; i--) {
+                    int max_allocation = 0;
+                    int j, k = i - 1, l, m;
+                    int dim;
+                    for (j = num_factors; j > 0; j--) {
+                        max_allocation += (i - 1) * pow(i, j - 1);
+                    }
+
+                    for (k = max_allocation; k > 0; k--) {
+                        int *unique_dimension_covered =
+                            (int *) MPL_malloc(i * sizeof(int), MPL_MEM_OTHER);
+                        int *unique_factors_covered =
+                            (int *) MPL_malloc(num_factors * sizeof(int), MPL_MEM_OTHER);
+                        int *count_along_dim =
+                            (int *) MPL_calloc(1, i * sizeof(int), MPL_MEM_OTHER);
+                        int num_config_dim = 0;
+                        int factor = k;
+                        int factors_covered = 0;
+                        int flag = -1;
+
+                        for (j = 0; j < num_factors; j++) {
+                            count_along_dim[j] = 1;
+                        }
+
+                        dim = 0;
+                        m = 0;
+
+                        for (j = num_factors - 1; j >= 0; j--) {
+                            int current_factor = factor % i;
+                            for (l = 0; l < m; l++) {
+                                if (unique_dimension_covered[l] == current_factor) {
+                                    break;
+                                }
+                            }
+                            if (l == m) {
+                                dim++;
+                            }
+
+                            unique_dimension_covered[m++] = current_factor;
+                            count_along_dim[current_factor] =
+                                count_along_dim[current_factor] * prime_factors[current_factor];
+
+                            /* Check if the size along that dimension is smaller than the current config generated */
+                            if (count_along_dim[current_factor] > node_dimensions[current_factor] ||
+                                count_along_dim[current_factor] % comm_size) {
+                                flag = current_factor;
+                                break;
+                            }
+                            factor = factor / i;
+                        }
+
+                        if (dim != i) {
+                            continue;
+                        }
+
+                        if (flag == -1 && dim == i) {
+                            for (j = 0; j < i; j++) {
+                                MPIR_Assert(count_along_dim[j] <= node_dimensions[j]);
+                            }
+                            partition_dimensions = count_along_dim;
+                            goto split;
+                        }
+                    }
+                }
+            }
+
+          split:
+            MPIR_Assert(num_nodes_covered <= total_num_nodes);
+            color = 0;
+
+            for (i = 0; i < MPIR_Process.network_attr.u.torus.dimension; i++) {
+                int coordinate_along_dim = current_rank % node_dimensions[i];
+                coordinate_along_dim = coordinate_along_dim / partition_dimensions[i];
+                if (i == 0) {
+                    color += coordinate_along_dim;
+                } else {
+                    color = color + coordinate_along_dim * (node_dimensions[i - 1] /
+                                                            partition_dimensions[i - 1]);
+                }
+                current_rank = current_rank / node_dimensions[i];
+            }
+        } else if (MPIR_Process.network_attr.type == MPIR_NETLOC_NETWORK_TYPE__FAT_TREE) {
             int index;
             int comm_size;
             comm_size = MPIR_Comm_size(comm_ptr);
@@ -466,6 +611,9 @@ static int network_split_by_size(MPIR_Comm * comm_ptr, int key,
         MPIR_ERR_POP(mpi_errno);
 
   fn_exit:
+    if (partition_dimensions != NULL) {
+        MPL_free(partition_dimensions);
+    }
     return mpi_errno;
 
   fn_fail:
