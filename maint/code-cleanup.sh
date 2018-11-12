@@ -1,4 +1,3 @@
-#! /bin/bash
 
 if hash gindent 2>/dev/null; then
 	indent=gindent
